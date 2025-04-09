@@ -1,0 +1,11 @@
+[package]
+name = "simulation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ndarray = "0.15"
+ndarray-rand = "0.14"
+plotters = "0.3"
+rand = "0.8"
+rayon = "1.5"
