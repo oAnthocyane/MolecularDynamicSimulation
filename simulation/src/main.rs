@@ -508,6 +508,160 @@ fn simulate(params: SimulationParams) -> SimulationResults {
     }
 }
 
+// Add this function to analyze sensitivity of pressure to changes in T and N
+fn analyze_sensitivity_and_uncertainty(
+    params: &SimulationParams,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n=== Sensitivity Analysis ===");
+    
+    // Base simulation
+    let mut base_params = params.clone();
+    base_params.save_trajectory = false;
+    base_params.use_thermostat = false;
+    println!("Running base simulation...");
+    let base_results = simulate(base_params);
+    
+    // Get average pressure from last 30% of steps
+    let start_idx = base_results.pressures.len() * 7 / 10;
+    let base_pressures = &base_results.pressures[start_idx..];
+    let avg_base_pressure = base_pressures.iter().sum::<f64>() / base_pressures.len() as f64;
+    
+    // Temperature variations (±10%)
+    let delta_t = 0.1 * params.t_target;
+    
+    let mut t_plus_params = params.clone();
+    t_plus_params.t_target += delta_t;
+    t_plus_params.save_trajectory = false;
+    println!("Running T+10% simulation...");
+    let t_plus_results = simulate(t_plus_params);
+    
+    let mut t_minus_params = params.clone();
+    t_minus_params.t_target -= delta_t;
+    t_minus_params.save_trajectory = false;
+    println!("Running T-10% simulation...");
+    let t_minus_results = simulate(t_minus_params);
+    
+    // Particle count variations (±5%)
+    let delta_n = (0.05 * params.n as f64).round() as usize;
+    
+    let mut n_plus_params = params.clone();
+    n_plus_params.n += delta_n;
+    n_plus_params.save_trajectory = false;
+    println!("Running N+5% simulation...");
+    let n_plus_results = simulate(n_plus_params);
+    
+    let mut n_minus_params = params.clone();
+    n_minus_params.n -= delta_n;
+    n_minus_params.save_trajectory = false;
+    println!("Running N-5% simulation...");
+    let n_minus_results = simulate(n_minus_params);
+    
+    // Calculate average pressures
+    let t_plus_pressures = &t_plus_results.pressures[t_plus_results.pressures.len() * 7 / 10..];
+    let t_minus_pressures = &t_minus_results.pressures[t_minus_results.pressures.len() * 7 / 10..];
+    let n_plus_pressures = &n_plus_results.pressures[n_plus_results.pressures.len() * 7 / 10..];
+    let n_minus_pressures = &n_minus_results.pressures[n_minus_results.pressures.len() * 7 / 10..];
+    
+    let avg_t_plus = t_plus_pressures.iter().sum::<f64>() / t_plus_pressures.len() as f64;
+    let avg_t_minus = t_minus_pressures.iter().sum::<f64>() / t_minus_pressures.len() as f64;
+    let avg_n_plus = n_plus_pressures.iter().sum::<f64>() / n_plus_pressures.len() as f64;
+    let avg_n_minus = n_minus_pressures.iter().sum::<f64>() / n_minus_pressures.len() as f64;
+    
+    // Calculate sensitivities
+    let dp_dt = (avg_t_plus - avg_t_minus) / (2.0 * delta_t);
+    let dp_dn = (avg_n_plus - avg_n_minus) / (2.0 * delta_n as f64);
+    
+    // Calculate uncertainty
+    let uncertainty = ((dp_dt * delta_t).powi(2) + (dp_dn * delta_n as f64).powi(2)).sqrt();
+    let percent_uncertainty = 100.0 * uncertainty / avg_base_pressure;
+    
+    // Print results
+    println!("\n=== Sensitivity Analysis Results ===");
+    println!("Base pressure: {:.4}", avg_base_pressure);
+    println!("dP/dT ≈ {:.4}", dp_dt);
+    println!("dP/dN ≈ {:.4}", dp_dn);
+    println!("Uncertainty in pressure ≈ ±{:.4} ({:.2}%)", uncertainty, percent_uncertainty);
+    
+    // Save results to file
+    save_sensitivity_results(
+        &base_results, &t_plus_results, &t_minus_results, &n_plus_results, &n_minus_results,
+        avg_base_pressure, dp_dt, dp_dn, uncertainty, percent_uncertainty,
+        params, delta_t, delta_n
+    )?;
+    
+    Ok(())
+}
+
+fn save_sensitivity_results(
+    base_results: &SimulationResults,
+    t_plus_results: &SimulationResults,
+    t_minus_results: &SimulationResults,
+    n_plus_results: &SimulationResults,
+    n_minus_results: &SimulationResults,
+    avg_base_pressure: f64,
+    dp_dt: f64,
+    dp_dn: f64,
+    uncertainty: f64,
+    percent_uncertainty: f64,
+    params: &SimulationParams,
+    delta_t: f64,
+    delta_n: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create directory if it doesn't exist
+    let dir_path = Path::new("../result_simulation");
+    if !dir_path.exists() {
+        fs::create_dir_all(dir_path)?;
+    }
+    
+    // Save sensitivity summary
+    let summary_file = File::create(dir_path.join("sensitivity_summary.csv"))?;
+    let mut summary_writer = BufWriter::new(summary_file);
+    
+    writeln!(summary_writer, "parameter,value")?;
+    writeln!(summary_writer, "base_pressure,{}", avg_base_pressure)?;
+    writeln!(summary_writer, "dp_dt,{}", dp_dt)?;
+    writeln!(summary_writer, "dp_dn,{}", dp_dn)?;
+    writeln!(summary_writer, "uncertainty,{}", uncertainty)?;
+    writeln!(summary_writer, "percent_uncertainty,{}", percent_uncertainty)?;
+    writeln!(summary_writer, "delta_t,{}", delta_t)?;
+    writeln!(summary_writer, "delta_n,{}", delta_n)?;
+    writeln!(summary_writer, "base_t,{}", params.t_target)?;
+    writeln!(summary_writer, "base_n,{}", params.n)?;
+    
+    // Save all pressure distributions for boxplot
+    let pressures_file = File::create(dir_path.join("sensitivity_pressures.csv"))?;
+    let mut pressures_writer = BufWriter::new(pressures_file);
+    
+    // Write header
+    writeln!(pressures_writer, "step,base,t_plus,t_minus,n_plus,n_minus")?;
+    
+    let min_length = [
+    base_results.pressures.len(),
+    t_plus_results.pressures.len(),
+    t_minus_results.pressures.len(),
+    n_plus_results.pressures.len(),
+    n_minus_results.pressures.len(),
+    ].into_iter().min().unwrap();
+    
+    // Write pressure data
+    for i in 0..min_length {
+        writeln!(
+            pressures_writer,
+            "{},{},{},{},{},{}",
+            base_results.times[i],
+            base_results.pressures[i],
+            t_plus_results.pressures[i],
+            t_minus_results.pressures[i],
+            n_plus_results.pressures[i],
+            n_minus_results.pressures[i],
+        )?;
+    }
+    
+    println!("Saved sensitivity analysis results to: {:?}", dir_path);
+    Ok(())
+}
+
+// Modify the run_simulations function to include sensitivity analysis
 fn run_simulations() -> Result<(), Box<dyn std::error::Error>> {
     let mut base_params = SimulationParams::default();
     // Опционально можно включить сохранение траектории
@@ -533,6 +687,10 @@ fn run_simulations() -> Result<(), Box<dyn std::error::Error>> {
     let results3 = simulate(params3.clone());
     save_results_to_csv(&results3, "mixed")?;
     save_simulation_params(&params3, "mixed")?;
+    
+    // Run sensitivity analysis with periodic boundary conditions
+    let analysis_params = base_params.clone();
+    analyze_sensitivity_and_uncertainty(&analysis_params)?;
     
     println!("\nAll simulations completed. Results saved to CSV files.");
     println!("Use the accompanying Python script to visualize the results.");
